@@ -133,8 +133,8 @@ export function PropertiesPanel({ block, onUpdate }: PropertiesPanelProps) {
               <Label className="text-xs font-medium text-gray-700">Text Align</Label>
               <Select
                 value={block.styles.textAlign || "left"}
-                onValueChange={(value: "left" | "center" | "right" | "justify") =>
-                  updateStyle("textAlign", value)
+                onValueChange={(value: string) =>
+                  updateStyle("textAlign", value as "left" | "center" | "right" | "justify")
                 }
               >
                 <SelectTrigger className="mt-1 text-sm">
