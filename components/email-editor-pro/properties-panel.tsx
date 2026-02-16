@@ -169,8 +169,8 @@ export function PropertiesPanel({ block, onUpdate }: PropertiesPanelProps) {
               <Label className="text-xs font-medium text-gray-700">Image Align</Label>
               <Select
                 value={block.styles.imageAlign || "center"}
-                onValueChange={(value: "left" | "center" | "right") =>
-                  updateStyle("imageAlign", value)
+                onValueChange={(value: string) =>
+                  updateStyle("imageAlign", value as "left" | "center" | "right")
                 }
               >
                 <SelectTrigger className="mt-1 text-sm">
@@ -306,8 +306,8 @@ export function PropertiesPanel({ block, onUpdate }: PropertiesPanelProps) {
             <Label className="text-xs font-medium text-gray-700">Column Layout</Label>
             <Select
               value={block.styles.columnLayout || "50-50"}
-              onValueChange={(value: "50-50" | "33-67" | "67-33") =>
-                updateStyle("columnLayout", value)
+              onValueChange={(value: string) =>
+                updateStyle("columnLayout", value as "50-50" | "33-67" | "67-33")
               }
             >
               <SelectTrigger className="mt-1 text-sm">
