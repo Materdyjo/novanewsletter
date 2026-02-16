@@ -635,7 +635,7 @@ export function EmailEditor({
 
       {rows.length === 0 && canEdit && (
         <div className="text-center py-12 border-2 border-dashed rounded-lg text-gray-400">
-          <p>No content yet. Click "Add" buttons above to get started.</p>
+          <p>No content yet. Click &quot;Add&quot; buttons above to get started.</p>
         </div>
       )}
     </div>

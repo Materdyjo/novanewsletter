@@ -207,7 +207,7 @@ export default function DashboardPage() {
         <div className="text-center py-12">
           <p className="text-muted-foreground">No news items found.</p>
           <p className="text-sm text-muted-foreground mt-2">
-            Click "Fetch News" to load articles from RSS feeds.
+            Click &quot;Fetch News&quot; to load articles from RSS feeds.
           </p>
         </div>
       ) : (
@@ -225,7 +225,7 @@ export default function DashboardPage() {
                 <div className="flex flex-col gap-4">
                   {sourceArticles.length === 0 ? (
                     <p className="text-sm text-muted-foreground">
-                      No articles from this source. Try clicking "Fetch News" to load articles.
+                      No articles from this source. Try clicking &quot;Fetch News&quot; to load articles.
                     </p>
                   ) : (
                     sourceArticles.map((item) => (
