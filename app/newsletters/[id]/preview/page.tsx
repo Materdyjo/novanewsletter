@@ -4,9 +4,17 @@ import { useEffect, useState, useRef } from "react";
 import { useParams } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Loader2, Send, ArrowLeft, Save, Bold, Italic, Underline } from "lucide-react";
+import {
+  Loader2,
+  Send,
+  ArrowLeft,
+  Save,
+  Mail,
+} from "lucide-react";
 import Link from "next/link";
 import { sendNewsletter } from "@/app/actions/send-newsletter";
+import { useRouter } from "next/navigation";
+import { EmailEditorPro } from "@/components/email-editor-pro/email-editor-pro";
 
 interface Newsletter {
   id: string;
@@ -18,6 +26,7 @@ interface Newsletter {
 
 export default function PreviewNewsletterPage() {
   const params = useParams();
+  const router = useRouter();
   const newsletterId = params.id as string;
   const [newsletter, setNewsletter] = useState<Newsletter | null>(null);
   const [subject, setSubject] = useState("");
@@ -27,8 +36,19 @@ export default function PreviewNewsletterPage() {
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
   const [saveMessage, setSaveMessage] = useState<string | null>(null);
-  const editableRef = useRef<HTMLDivElement>(null);
-  const savedSelectionRef = useRef<{ anchorNode: Node; anchorOffset: number; focusNode: Node; focusOffset: number } | null>(null);
+  const [editorHtml, setEditorHtml] = useState("");
+  const [htmlSizeKB, setHtmlSizeKB] = useState<number>(0);
+  const editorHtmlRef = useRef(editorHtml);
+  useEffect(() => {
+    editorHtmlRef.current = editorHtml;
+    // Track HTML size for Gmail clipping warnings
+    if (editorHtml) {
+      const sizeKB = new Blob([editorHtml]).size / 1024;
+      setHtmlSizeKB(sizeKB);
+    } else {
+      setHtmlSizeKB(0);
+    }
+  }, [editorHtml]);
 
   useEffect(() => {
     fetchNewsletter();
@@ -37,26 +57,10 @@ export default function PreviewNewsletterPage() {
   useEffect(() => {
     if (newsletter) {
       setSubject(newsletter.email_subject);
-      if (editableRef.current) {
-        editableRef.current.innerHTML = newsletter.email_body_html;
-      }
+      setEditorHtml(newsletter.email_body_html);
     }
   }, [newsletter?.id, newsletter?.email_subject, newsletter?.email_body_html]);
 
-  useEffect(() => {
-    const onSelectionChange = () => {
-      const sel = window.getSelection();
-      if (!sel || sel.rangeCount === 0 || !editableRef.current?.contains(sel.anchorNode)) return;
-      savedSelectionRef.current = {
-        anchorNode: sel.anchorNode!,
-        anchorOffset: sel.anchorOffset,
-        focusNode: sel.focusNode!,
-        focusOffset: sel.focusOffset,
-      };
-    };
-    document.addEventListener("selectionchange", onSelectionChange);
-    return () => document.removeEventListener("selectionchange", onSelectionChange);
-  }, []);
 
   const fetchNewsletter = async () => {
     try {
@@ -76,44 +80,16 @@ export default function PreviewNewsletterPage() {
     }
   };
 
-  const saveSelection = () => {
-    const sel = window.getSelection();
-    if (!sel || sel.rangeCount === 0 || !editableRef.current?.contains(sel.anchorNode)) return;
-    savedSelectionRef.current = {
-      anchorNode: sel.anchorNode!,
-      anchorOffset: sel.anchorOffset,
-      focusNode: sel.focusNode!,
-      focusOffset: sel.focusOffset,
-    };
-  };
-
-  const restoreSelection = () => {
-    const saved = savedSelectionRef.current;
-    if (!saved || !editableRef.current) return false;
-    try {
-      const sel = window.getSelection();
-      if (!sel) return false;
-      const range = document.createRange();
-      range.setStart(saved.anchorNode, saved.anchorOffset);
-      range.setEnd(saved.focusNode, saved.focusOffset);
-      sel.removeAllRanges();
-      sel.addRange(range);
-      editableRef.current.focus();
-      return true;
-    } catch {
-      return false;
-    }
-  };
-
-  const applyFormat = (command: string, value?: string) => {
-    restoreSelection();
-    document.execCommand(command, false, value);
-    editableRef.current?.focus();
-  };
 
   const handleSaveDraft = async () => {
     if (!newsletter || newsletter.status === "sent") return;
-    const newHtml = editableRef.current?.innerHTML ?? newsletter.email_body_html;
+    // Flush any focused contentEditable (header/text) so its content is saved
+    if (typeof document !== "undefined" && document.activeElement?.getAttribute?.("contenteditable") === "true") {
+      (document.activeElement as HTMLElement).blur();
+      await new Promise((r) => setTimeout(r, 350));
+    }
+    // Use ref to get latest HTML (includes any just-flushed content)
+    const newHtml = editorHtmlRef.current || editorHtml || newsletter.email_body_html;
     setSaving(true);
     setError(null);
     setSaveMessage(null);
@@ -133,8 +109,16 @@ export default function PreviewNewsletterPage() {
       }
       const data = await res.json();
       setNewsletter(data);
-      setSaveMessage("Zapisano.");
-      setTimeout(() => setSaveMessage(null), 3000);
+      // Verify what was saved
+      const savedHtmlLength = data.email_body_html?.length || 0;
+      const savedHtmlSizeKB = (savedHtmlLength / 1024).toFixed(1);
+      setSaveMessage(`Zapisano. (${savedHtmlSizeKB}KB)`);
+      setTimeout(() => setSaveMessage(null), 4000);
+      
+      // Also update editorHtml state to match what was saved
+      if (data.email_body_html) {
+        setEditorHtml(data.email_body_html);
+      }
     } catch (err) {
       setError("Failed to save draft");
     } finally {
@@ -144,8 +128,12 @@ export default function PreviewNewsletterPage() {
 
   const handleSendNow = async () => {
     if (!newsletter) return;
-    // Save any unsaved edits first
-    const newHtml = editableRef.current?.innerHTML ?? newsletter.email_body_html;
+    // Flush any focused contentEditable (header/text) so its content is saved before we read HTML
+    if (typeof document !== "undefined" && document.activeElement?.getAttribute?.("contenteditable") === "true") {
+      (document.activeElement as HTMLElement).blur();
+      await new Promise((r) => setTimeout(r, 350));
+    }
+    const newHtml = editorHtmlRef.current || editorHtml || newsletter.email_body_html;
     const newSubject = subject.trim() || newsletter.email_subject;
     if (newHtml !== newsletter.email_body_html || newSubject !== newsletter.email_subject) {
       await fetch(`/api/newsletters/${newsletterId}`, {
@@ -161,7 +149,7 @@ export default function PreviewNewsletterPage() {
     setSuccess(false);
 
     try {
-      const result = await sendNewsletter(newsletterId);
+      const result = await sendNewsletter(newsletterId, newHtml);
 
       if (result.error) {
         setError(result.error);
@@ -236,6 +224,17 @@ export default function PreviewNewsletterPage() {
           <h1 className="text-3xl font-bold mt-4">Preview Newsletter</h1>
           <p className="text-sm text-muted-foreground mt-1">
             Status: <span className="capitalize">{newsletter.status}</span>
+            {htmlSizeKB > 0 && (
+              <span className="ml-3">
+                Size: {htmlSizeKB.toFixed(1)}KB
+                {htmlSizeKB > 100 && (
+                  <span className="text-orange-600 ml-1" title="Gmail hides the rest of emails over ~102KB and shows «Pokaż całą wiadomość». Use image URLs instead of uploaded images to reduce size.">⚠️ Gmail may clip</span>
+                )}
+                {htmlSizeKB > 50 && editorHtml.includes('data:image') && (
+                  <span className="text-orange-600 ml-1" title="Images were pasted/uploaded and are embedded in the email, which makes it large. Add images by URL (link) to keep the email small and avoid Gmail clipping.">⚠️ Contains base64 images</span>
+                )}
+              </span>
+            )}
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -252,6 +251,16 @@ export default function PreviewNewsletterPage() {
                 <Save className="mr-2 h-4 w-4" />
               )}
               Save draft
+            </Button>
+          )}
+          {newsletter.status !== "sent" && (
+            <Button
+              onClick={() => router.push(`/newsletters/${newsletterId}/select-list`)}
+              variant="outline"
+              size="lg"
+            >
+              <Mail className="mr-2 h-4 w-4" />
+              Choose Email List
             </Button>
           )}
           <Button
@@ -319,110 +328,16 @@ export default function PreviewNewsletterPage() {
         </CardContent>
       </Card>
 
-      <Card>
-        <CardHeader className="flex flex-row items-center justify-between">
-          <CardTitle>Content</CardTitle>
-          {canEdit && (
-            <div className="flex flex-wrap items-center gap-1 p-2 border rounded-lg bg-muted/50">
-              <select
-                className="h-8 rounded px-2 text-sm border bg-background"
-                onChange={(e) => {
-                  const v = e.target.value;
-                  if (v) applyFormat("fontName", v);
-                }}
-                onMouseDown={saveSelection}
-              >
-                <option value="">Font</option>
-                <option value="Arial">Arial</option>
-                <option value="Georgia">Georgia</option>
-                <option value="Times New Roman">Times New Roman</option>
-                <option value="Verdana">Verdana</option>
-                <option value="Courier New">Courier New</option>
-                <option value="Trebuchet MS">Trebuchet MS</option>
-              </select>
-              <select
-                className="h-8 rounded px-2 text-sm border bg-background"
-                onChange={(e) => {
-                  const v = e.target.value;
-                  if (v) applyFormat("fontSize", v);
-                }}
-                onMouseDown={saveSelection}
-              >
-                <option value="">Size</option>
-                <option value="1">Small</option>
-                <option value="2">Normal</option>
-                <option value="3">Medium</option>
-                <option value="4">Large</option>
-                <option value="5">X-Large</option>
-              </select>
-              <Button
-                type="button"
-                variant="outline"
-                size="icon"
-                className="h-8 w-8"
-                onClick={() => applyFormat("bold")}
-              >
-                <Bold className="h-4 w-4" />
-              </Button>
-              <Button
-                type="button"
-                variant="outline"
-                size="icon"
-                className="h-8 w-8"
-                onClick={() => applyFormat("italic")}
-              >
-                <Italic className="h-4 w-4" />
-              </Button>
-              <Button
-                type="button"
-                variant="outline"
-                size="icon"
-                className="h-8 w-8"
-                onClick={() => applyFormat("underline")}
-              >
-                <Underline className="h-4 w-4" />
-              </Button>
-              <input
-                type="color"
-                className="h-8 w-8 cursor-pointer border rounded p-0"
-                defaultValue="#000000"
-                onInput={(e) => applyFormat("foreColor", (e.target as HTMLInputElement).value)}
-              />
-            </div>
-          )}
+      <Card className="overflow-hidden">
+        <CardHeader>
+          <CardTitle>Email Content</CardTitle>
         </CardHeader>
-        <CardContent>
-          <div className="border rounded-lg bg-white max-w-4xl mx-auto overflow-hidden">
-            <style jsx global>{`
-              .newsletter-editor {
-                font-family: Arial, sans-serif;
-                line-height: 1.6;
-                color: #333;
-                min-height: 320px;
-                padding: 1rem;
-                outline: none;
-              }
-              .newsletter-editor:focus {
-                outline: none;
-              }
-              .newsletter-editor img {
-                max-width: 100%;
-                height: auto;
-              }
-              .newsletter-editor a {
-                color: #2563eb;
-                text-decoration: underline;
-              }
-              .newsletter-editor table {
-                width: 100%;
-                border-collapse: collapse;
-              }
-            `}</style>
-            <div
-              ref={editableRef}
-              contentEditable={canEdit}
-              suppressContentEditableWarning
-              className="newsletter-editor"
+        <CardContent className="p-0">
+          <div className="h-[800px] overflow-hidden">
+            <EmailEditorPro
+              initialHtml={newsletter.email_body_html}
+              onContentChange={setEditorHtml}
+              canEdit={canEdit}
             />
           </div>
         </CardContent>

@@ -31,8 +31,19 @@ export default function DashboardPage() {
     fetchNewsItems();
   }, []);
 
-  // Only show articles from our three seafood sources (no BBC or other sites)
-  const SEAFOOD_SOURCES = ["undercurrentnews.com", "seafoodsource.com", "intrafish.com"];
+  // Only show articles from our seafood sources
+  const SEAFOOD_SOURCES = [
+    { key: "undercurrentnews.com", label: "Undercurrent News" },
+    { key: "seafoodsource.com", label: "Seafood Source" },
+    { key: "intrafish.com", label: "IntraFish" },
+    { key: "portalspozywczy.pl", label: "Portal Spożywczy" },
+  ];
+
+  // Normalize source site for matching (remove www. and protocol)
+  const normalizeSourceSite = (sourceSite: string | null | undefined): string => {
+    if (!sourceSite) return "";
+    return sourceSite.toLowerCase().replace(/^www\./, "").trim();
+  };
 
   const fetchNewsItems = async () => {
     try {
@@ -46,18 +57,42 @@ export default function DashboardPage() {
         return;
       }
 
-      const filtered = (data || []).filter((item: NewsItem) =>
-        SEAFOOD_SOURCES.some(
-          (source) =>
-            item.source_site?.toLowerCase().includes(source)
-        )
-      );
+      const filtered = (data || []).filter((item: NewsItem) => {
+        const normalizedSite = normalizeSourceSite(item.source_site);
+        return SEAFOOD_SOURCES.some((source) => {
+          const normalizedKey = normalizeSourceSite(source.key);
+          return normalizedSite.includes(normalizedKey) || normalizedKey.includes(normalizedSite);
+        });
+      });
+      
+      // Debug: log unique source sites found
+      const uniqueSources = [...new Set(filtered.map(item => item.source_site))];
+      console.log("Found articles from sources:", uniqueSources);
+      console.log("Total articles:", filtered.length);
+      
       setNewsItems(filtered);
     } catch (error) {
       console.error("Error:", error);
     } finally {
       setLoading(false);
     }
+  };
+
+  // Group articles by source and get top 10 per source
+  const getArticlesBySource = (sourceKey: string) => {
+    const normalizedKey = normalizeSourceSite(sourceKey);
+    const filtered = newsItems.filter((item) => {
+      const normalizedSite = normalizeSourceSite(item.source_site);
+      return normalizedSite.includes(normalizedKey) || normalizedKey.includes(normalizedSite);
+    });
+    
+    // Debug logging
+    if (filtered.length === 0) {
+      const allSources = [...new Set(newsItems.map(item => item.source_site))];
+      console.log(`No articles found for ${sourceKey}. Available sources:`, allSources);
+    }
+    
+    return filtered.slice(0, 10);
   };
 
   const toggleSelection = (id: string) => {
@@ -171,50 +206,71 @@ export default function DashboardPage() {
       {newsItems.length === 0 ? (
         <div className="text-center py-12">
           <p className="text-muted-foreground">No news items found.</p>
+          <p className="text-sm text-muted-foreground mt-2">
+            Click "Fetch News" to load articles from RSS feeds.
+          </p>
         </div>
       ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-          {newsItems.map((item) => (
-            <Card
-              key={item.id}
-              className={`cursor-pointer transition-all hover:shadow-lg ${
-                selectedIds.has(item.id) ? "ring-2 ring-primary" : ""
-              }`}
-              onClick={() => toggleSelection(item.id)}
-            >
-              <CardHeader>
-                <div className="flex items-start justify-between gap-4">
-                  <div className="flex-1">
-                    <Badge variant="secondary" className="mb-2">
-                      {item.source_site}
-                    </Badge>
-                    <CardTitle className="text-lg line-clamp-2">
-                      {item.title}
-                    </CardTitle>
-                  </div>
-                  <Checkbox
-                    checked={selectedIds.has(item.id)}
-                    onCheckedChange={() => toggleSelection(item.id)}
-                    onClick={(e) => e.stopPropagation()}
-                  />
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+          {SEAFOOD_SOURCES.map((source) => {
+            const sourceArticles = getArticlesBySource(source.key);
+            return (
+              <div key={source.key} className="flex flex-col">
+                <h2 className="text-xl font-semibold mb-4 pb-2 border-b">
+                  {source.label}
+                  <span className="text-sm font-normal text-muted-foreground ml-2">
+                    ({sourceArticles.length})
+                  </span>
+                </h2>
+                <div className="flex flex-col gap-4">
+                  {sourceArticles.length === 0 ? (
+                    <p className="text-sm text-muted-foreground">
+                      No articles from this source. Try clicking "Fetch News" to load articles.
+                    </p>
+                  ) : (
+                    sourceArticles.map((item) => (
+                      <Card
+                        key={item.id}
+                        className={`cursor-pointer transition-all hover:shadow-lg ${
+                          selectedIds.has(item.id) ? "ring-2 ring-primary" : ""
+                        }`}
+                        onClick={() => toggleSelection(item.id)}
+                      >
+                        <CardHeader>
+                          <div className="flex items-start justify-between gap-4">
+                            <div className="flex-1">
+                              <CardTitle className="text-base line-clamp-2">
+                                {item.title}
+                              </CardTitle>
+                            </div>
+                            <Checkbox
+                              checked={selectedIds.has(item.id)}
+                              onCheckedChange={() => toggleSelection(item.id)}
+                              onClick={(e) => e.stopPropagation()}
+                            />
+                          </div>
+                        </CardHeader>
+                        <CardContent>
+                          <p className="text-sm text-muted-foreground line-clamp-3">
+                            {item.summary || item.original_snippet || "No snippet available"}
+                          </p>
+                          <a
+                            href={item.url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-xs text-primary hover:underline mt-2 inline-block"
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            Read more →
+                          </a>
+                        </CardContent>
+                      </Card>
+                    ))
+                  )}
                 </div>
-              </CardHeader>
-              <CardContent>
-                <p className="text-sm text-muted-foreground line-clamp-3">
-                  {item.summary || item.original_snippet || "No snippet available"}
-                </p>
-                <a
-                  href={item.url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-xs text-primary hover:underline mt-2 inline-block"
-                  onClick={(e) => e.stopPropagation()}
-                >
-                  Read more →
-                </a>
-              </CardContent>
-            </Card>
-          ))}
+              </div>
+            );
+          })}
         </div>
       )}
 

@@ -1,15 +1,31 @@
 import { NextRequest, NextResponse } from "next/server";
 import Parser from "rss-parser";
 import { supabase } from "@/lib/supabase";
+import * as cheerio from "cheerio";
 
 const parser = new Parser({
-  timeout: 15000,
+  timeout: 20000,
   headers: {
     "User-Agent":
       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     Accept:
-      "application/rss+xml, application/xml, text/xml, */*",
+      "application/rss+xml, application/xml, text/xml, application/atom+xml, */*",
   },
+  customFields: {
+    item: ['content:encoded', 'description', 'summary'],
+  },
+  // Try to handle malformed XML better and support Atom feeds
+  xml2js: {
+    trim: true,
+    normalize: true,
+    normalizeTags: false,
+    attrkey: '_attr',
+    charkey: '_text',
+    explicitArray: false,
+    mergeAttrs: true,
+  },
+  // Enable Atom feed support
+  defaultRSS: 2.0,
 });
 
 interface NewsItemRow {
@@ -42,29 +58,28 @@ function extractSourceSite(url: string): string {
   }
 }
 
-// Only seafood sources: Undercurrent News, Seafood Source, IntraFish (no BBC or other non-seafood)
+// Only seafood sources: Undercurrent News, Seafood Source, IntraFish, Portal Spożywczy
 const FEED_URLS: { url: string; label: string }[] = [
   // Undercurrent News - https://www.undercurrentnews.com/
   { url: "https://www.undercurrentnews.com/feed/", label: "Undercurrent News" },
   { url: "https://www.undercurrentnews.com/rss", label: "Undercurrent News" },
-  { url: "https://www.undercurrentnews.com/rss.xml", label: "Undercurrent News" },
-  { url: "https://undercurrentnews.com/feed/", label: "Undercurrent News" },
-  // Seafood Source - https://www.seafoodsource.com/
-  { url: "https://www.seafoodsource.com/feed/", label: "Seafood Source" },
-  { url: "https://www.seafoodsource.com/rss", label: "Seafood Source" },
-  { url: "https://www.seafoodsource.com/rss.xml", label: "Seafood Source" },
-  { url: "https://seafoodsource.com/feed/", label: "Seafood Source" },
   // IntraFish - https://www.intrafish.com/
-  { url: "https://www.intrafish.com/feed/", label: "IntraFish" },
-  { url: "https://www.intrafish.com/rss", label: "IntraFish" },
-  { url: "https://www.intrafish.com/rss.xml", label: "IntraFish" },
-  { url: "https://intrafish.com/feed/", label: "IntraFish" },
+  // Try alternative feed URLs
+  { url: "https://intrafish.com/feed", label: "IntraFish" },
+  { url: "https://www.intrafish.com/rss_fisheries", label: "IntraFish" },
+  // Portal Spożywczy - Ryby i owoce morza - https://www.portalspozywczy.pl/ryby/
+  { url: "https://www.portalspozywczy.pl/rss/ryby.xml", label: "Portal Spożywczy" },
+  // Seafood Source - Note: These feeds return 403 (Forbidden), likely require authentication
+  // Keeping commented out for reference - may need alternative approach
+  // { url: "https://www.seafoodsource.com/feed/", label: "Seafood Source" },
+  // { url: "https://www.seafoodsource.com/rss", label: "Seafood Source" },
 ];
 
 async function fetchFeed(
   feedUrl: string
 ): Promise<{ items: NewsItemRow[]; worked: boolean }> {
   try {
+    // Try to fetch and parse the feed
     const feed = await parser.parseURL(feedUrl);
     const latest = (feed.items || []).slice(0, 10);
     const items: NewsItemRow[] = [];
@@ -85,14 +100,196 @@ async function fetchFeed(
         summary:
           item.contentSnippet ||
           (item.content ? String(item.content).substring(0, 500) : null) ||
+          item.description ||
           null,
-        original_snippet: item.contentSnippet || null,
+        original_snippet: item.contentSnippet || item.description || null,
       });
     }
 
     return { items, worked: items.length > 0 };
-  } catch (err) {
-    console.error(`Feed failed ${feedUrl}:`, err);
+  } catch (err: any) {
+    // More detailed error logging
+    const errorMsg = err?.message || String(err);
+    const statusCode = err?.statusCode || err?.status;
+    
+    // Handle XML parsing errors more gracefully
+    if (errorMsg.includes("Invalid character in entity name") || 
+        errorMsg.includes("XML") || 
+        errorMsg.includes("parse")) {
+      console.error(`Feed failed ${feedUrl}: XML parsing error - malformed feed`);
+    } else if (statusCode === 403 || statusCode === 404 || statusCode === 429) {
+      console.error(`Feed failed ${feedUrl}: Status ${statusCode}`);
+    } else {
+      console.error(`Feed failed ${feedUrl}:`, errorMsg.substring(0, 200));
+    }
+    return { items: [], worked: false };
+  }
+}
+
+// Web scraping function for Seafood Source (RSS feeds are blocked)
+async function scrapeSeafoodSource(): Promise<{ items: NewsItemRow[]; worked: boolean }> {
+  try {
+    const response = await fetch("https://www.seafoodsource.com/news", {
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      },
+    });
+
+    if (!response.ok) {
+      console.error(`Seafood Source scraping failed: Status ${response.status}`);
+      return { items: [], worked: false };
+    }
+
+    const html = await response.text();
+    const $ = cheerio.load(html);
+    const items: NewsItemRow[] = [];
+    const seenUrls = new Set<string>();
+
+    // Try multiple selectors to find articles
+    const selectors = [
+      'article a[href*="/news/"]',
+      '.article-item a[href*="/news/"]',
+      '.news-item a[href*="/news/"]',
+      'a[href*="/news/"][href*="/aquaculture/"]',
+      'a[href*="/news/"][href*="/supply-trade/"]',
+      'a[href*="/news/"][href*="/business-finance/"]',
+    ];
+
+    for (const selector of selectors) {
+      $(selector).slice(0, 15).each((_, element) => {
+        const $link = $(element);
+        const href = $link.attr("href");
+        if (!href || seenUrls.has(href)) return;
+
+        // Find the title - could be in the link text or nearby elements
+        let title = $link.text().trim();
+        if (!title || title.length < 10) {
+          title = $link.closest("article, .article-item, .news-item")
+            .find("h2, h3, .title, .headline").first().text().trim() || title;
+        }
+
+        // Find summary/excerpt - try multiple approaches
+        const $parent = $link.closest("article, .article-item, .news-item, .card, .post");
+        let summary = $parent.find("p, .summary, .excerpt, .description, .snippet").first().text().trim();
+        
+        // If no summary found, try finding next sibling paragraph
+        if (!summary || summary.length < 20) {
+          summary = $link.parent().next("p").text().trim() || 
+                   $link.closest("div").find("p").not(":has(a)").first().text().trim();
+        }
+        
+        // Clean up summary
+        if (summary) {
+          summary = summary.replace(/\s+/g, " ").trim().substring(0, 300);
+        }
+
+        if (title && title.length > 10) {
+          const fullUrl = href.startsWith("http") ? href : `https://www.seafoodsource.com${href}`;
+          seenUrls.add(href);
+          items.push({
+            title: toTitleCase(title),
+            url: fullUrl,
+            source_site: "seafoodsource.com",
+            published_at: new Date().toISOString(),
+            summary: summary || `Read more about ${title.substring(0, 50)}...`,
+            original_snippet: summary || null,
+          });
+        }
+      });
+
+      if (items.length >= 10) break;
+    }
+
+    return { items: items.slice(0, 10), worked: items.length > 0 };
+  } catch (err: any) {
+    console.error(`Seafood Source scraping error:`, err?.message?.substring(0, 200));
+    return { items: [], worked: false };
+  }
+}
+
+// Web scraping function for IntraFish (RSS feeds are failing)
+async function scrapeIntraFish(): Promise<{ items: NewsItemRow[]; worked: boolean }> {
+  try {
+    const response = await fetch("https://www.intrafish.com/latest", {
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      },
+    });
+
+    if (!response.ok) {
+      console.error(`IntraFish scraping failed: Status ${response.status}`);
+      return { items: [], worked: false };
+    }
+
+    const html = await response.text();
+    const $ = cheerio.load(html);
+    const items: NewsItemRow[] = [];
+    const seenUrls = new Set<string>();
+
+    // Try multiple selectors to find articles
+    const selectors = [
+      'article a[href*="/"]',
+      '.article-item a[href*="/"]',
+      '.news-item a[href*="/"]',
+      '.post a[href*="/"]',
+      'a[href*="/salmon/"]',
+      'a[href*="/aquaculture/"]',
+      'a[href*="/fisheries/"]',
+    ];
+
+    for (const selector of selectors) {
+      $(selector).slice(0, 15).each((_, element) => {
+        const $link = $(element);
+        const href = $link.attr("href");
+        if (!href || seenUrls.has(href)) return;
+        
+        // Skip external links that aren't from intrafish.com
+        if (href.startsWith("http") && !href.includes("intrafish.com")) return;
+
+        // Find the title
+        let title = $link.text().trim();
+        if (!title || title.length < 10) {
+          title = $link.closest("article, .article-item, .news-item, .post")
+            .find("h1, h2, h3, .title, .headline").first().text().trim() || title;
+        }
+
+        // Find summary/excerpt
+        const $parent = $link.closest("article, .article-item, .news-item, .post");
+        let summary = $parent.find("p, .summary, .excerpt, .description").first().text().trim();
+        
+        if (!summary || summary.length < 20) {
+          summary = $link.parent().next("p").text().trim() || 
+                   $link.closest("div").find("p").not(":has(a)").first().text().trim();
+        }
+        
+        if (summary) {
+          summary = summary.replace(/\s+/g, " ").trim().substring(0, 300);
+        }
+
+        if (title && title.length > 10) {
+          const fullUrl = href.startsWith("http") ? href : `https://www.intrafish.com${href}`;
+          seenUrls.add(href);
+          items.push({
+            title: toTitleCase(title),
+            url: fullUrl,
+            source_site: "intrafish.com",
+            published_at: new Date().toISOString(),
+            summary: summary || `Read more about ${title.substring(0, 50)}...`,
+            original_snippet: summary || null,
+          });
+        }
+      });
+
+      if (items.length >= 10) break;
+    }
+
+    return { items: items.slice(0, 10), worked: items.length > 0 };
+  } catch (err: any) {
+    console.error(`IntraFish scraping error:`, err?.message?.substring(0, 200));
     return { items: [], worked: false };
   }
 }
@@ -101,6 +298,7 @@ export async function POST(_request: NextRequest) {
   try {
     const allItems: NewsItemRow[] = [];
     const seenUrls = new Set<string>();
+    const sourceStats: Record<string, number> = {};
 
     for (const { url, label } of FEED_URLS) {
       const { items, worked } = await fetchFeed(url);
@@ -109,11 +307,51 @@ export async function POST(_request: NextRequest) {
           if (!seenUrls.has(item.url)) {
             seenUrls.add(item.url);
             allItems.push(item);
+            // Track articles by source
+            const source = item.source_site;
+            sourceStats[source] = (sourceStats[source] || 0) + 1;
           }
         }
-        console.log(`Fetched ${items.length} items from ${label} (${url})`);
+        console.log(`✓ Fetched ${items.length} items from ${label} (${url})`);
+      } else {
+        console.log(`✗ Failed to fetch from ${label} (${url})`);
       }
     }
+
+    // Try web scraping for Seafood Source (RSS feeds are blocked)
+    const { items: seafoodItems, worked: seafoodWorked } = await scrapeSeafoodSource();
+    if (seafoodWorked) {
+      for (const item of seafoodItems) {
+        if (!seenUrls.has(item.url)) {
+          seenUrls.add(item.url);
+          allItems.push(item);
+          const source = item.source_site;
+          sourceStats[source] = (sourceStats[source] || 0) + 1;
+        }
+      }
+      console.log(`✓ Scraped ${seafoodItems.length} items from Seafood Source`);
+    } else {
+      console.log(`✗ Failed to scrape Seafood Source`);
+    }
+
+    // Try web scraping for IntraFish (RSS feeds are failing)
+    const { items: intrafishItems, worked: intrafishWorked } = await scrapeIntraFish();
+    if (intrafishWorked) {
+      for (const item of intrafishItems) {
+        if (!seenUrls.has(item.url)) {
+          seenUrls.add(item.url);
+          allItems.push(item);
+          const source = item.source_site;
+          sourceStats[source] = (sourceStats[source] || 0) + 1;
+        }
+      }
+      console.log(`✓ Scraped ${intrafishItems.length} items from IntraFish`);
+    } else {
+      console.log(`✗ Failed to scrape IntraFish`);
+    }
+
+    // Log summary by source
+    console.log("Articles fetched by source:", sourceStats);
 
     if (allItems.length === 0) {
       return NextResponse.json({
@@ -121,7 +359,7 @@ export async function POST(_request: NextRequest) {
         totalFetched: 0,
         newItemsAdded: 0,
         message:
-          "No RSS feeds could be read. Undercurrent News, Seafood Source and IntraFish may not offer public RSS; try adding more feed URLs in the code.",
+          "No RSS feeds could be read. Undercurrent News, Seafood Source, IntraFish and Portal Spożywczy may not offer public RSS; try adding more feed URLs in the code.",
       });
     }
 
@@ -157,11 +395,16 @@ export async function POST(_request: NextRequest) {
       }
     }
 
+    const sourceBreakdown = Object.entries(sourceStats)
+      .map(([source, count]) => `${source}: ${count}`)
+      .join(", ");
+
     return NextResponse.json({
       success: true,
       totalFetched: allItems.length,
       newItemsAdded: newCount,
-      message: `Fetched ${allItems.length} items, added ${newCount} new items.`,
+      message: `Fetched ${allItems.length} items, added ${newCount} new items. Sources: ${sourceBreakdown || "none"}`,
+      sourceStats,
     });
   } catch (error) {
     console.error("fetch-news API error:", error);

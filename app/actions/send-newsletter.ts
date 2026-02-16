@@ -2,8 +2,12 @@
 
 import { Resend } from "resend";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
+import { htmlToPlainText } from "@/lib/email-utils";
 
-export async function sendNewsletter(newsletterId: string) {
+export async function sendNewsletter(
+  newsletterId: string,
+  htmlOverride?: string
+) {
   try {
     const apiKey = process.env.RESEND_API_KEY;
     if (!apiKey || apiKey.trim() === "") {
@@ -28,9 +32,10 @@ export async function sendNewsletter(newsletterId: string) {
       return { error: "Newsletter has already been sent" };
     }
 
-    // Get the current user's email
-    // For now, we'll use a placeholder or get from auth
-    // TODO: Replace with actual user authentication
+    // Get the recipient email address
+    // Note: Currently uses DEFAULT_USER_EMAIL from environment variables
+    // To implement user authentication: use Supabase Auth to get the current user's email
+    // Example: const { data: { user } } = await supabase.auth.getUser(); const userEmail = user?.email;
     const userEmail = process.env.DEFAULT_USER_EMAIL || "mateuszignacik00@gmail.com";
 
     // Send email via Resend. You cannot use @gmail.com as "from" (Google's domain).
@@ -40,12 +45,48 @@ export async function sendNewsletter(newsletterId: string) {
         ? process.env.RESEND_FROM_EMAIL
         : "onboarding@resend.dev";
 
+    // Use editor's current HTML if provided (so we send what the user sees), otherwise DB
+    let emailHtml =
+      htmlOverride != null && htmlOverride.trim() !== ""
+        ? htmlOverride.trim()
+        : newsletter.email_body_html;
+
+    // If still empty, use fallback message
+    if (!emailHtml || emailHtml.trim() === "") {
+      emailHtml = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="font-family: Arial, sans-serif; padding: 20px; background-color: #f4f4f4;">
+  <div style="max-width: 600px; margin: 0 auto; background-color: #ffffff; padding: 20px;">
+    <p>This newsletter is empty. Please add content using the editor.</p>
+  </div>
+</body>
+</html>`;
+    }
+
     const resend = new Resend(apiKey);
+    const plainText = htmlToPlainText(emailHtml);
+    
+    // Check HTML size - Gmail clips over ~102KB and shows "Wiadomość skrócona"
+    const htmlSizeKB = new Blob([emailHtml]).size / 1024;
+    const hasBase64Images = emailHtml.includes('data:image') || emailHtml.includes('base64');
+    
+    if (htmlSizeKB > 100) {
+      console.warn(`Email HTML is ${htmlSizeKB.toFixed(1)}KB - Gmail may clip it. Consider using image URLs instead of embedded images.`);
+    }
+    if (hasBase64Images && htmlSizeKB > 50) {
+      console.warn('Email contains base64 images which increase size. Use image URLs to avoid Gmail clipping.');
+    }
+    
     const { data, error } = await resend.emails.send({
       from: fromAddress,
       to: userEmail,
       subject: newsletter.email_subject,
-      html: newsletter.email_body_html,
+      html: emailHtml,
+      text: plainText,
     });
 
     if (error) {
